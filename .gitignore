@@ -19,3 +19,6 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Local architecture brainstorming sessions
+.superpowers/

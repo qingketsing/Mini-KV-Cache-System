@@ -125,6 +125,27 @@ func newTestStoreWithTouchBuffer(t testing.TB, size int, maintenance bool) *Core
 	return newConfiguredTestStore(t, cfg, newManualClock(testTime), maintenance, func([]byte) uint64 { return 0 })
 }
 
+func newFuzzStore(t testing.TB) *CoreStore {
+	t.Helper()
+	cfg := compactConfig()
+	cfg.CapacityBytes = 16 << 20
+	cfg.MaxObjectBytes = 4096
+	cfg.MaxStagingBytes = 8192
+	return newConfiguredTestStore(t, cfg, newManualClock(testTime), false, protocolHash)
+}
+
+func newBenchmarkStore(b *testing.B, capacity int64) *CoreStore {
+	b.Helper()
+	cfg := DefaultConfig()
+	cfg.CapacityBytes = capacity
+	cfg.MaxObjectBytes = capacity / 2
+	cfg.MaxStagingBytes = cfg.MaxObjectBytes
+	if int64(cfg.ChunkBytes) > cfg.MaxObjectBytes {
+		cfg.ChunkBytes = int(cfg.MaxObjectBytes)
+	}
+	return newConfiguredTestStore(b, cfg, realClock{}, true, protocolHash)
+}
+
 func waitForActiveOperations(t testing.TB, gate *operationGate, want int64) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

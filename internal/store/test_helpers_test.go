@@ -100,3 +100,26 @@ func assertValue(t testing.TB, store *CoreStore, key, want string) {
 		t.Fatalf("got=%q want=%q err=%v", got, want, err)
 	}
 }
+
+func costFor(key string, payloadBytes int) int64 {
+	return int64(payloadBytes+len(key)) + entryOverheadBytes
+}
+
+func newCapacityTestStore(t testing.TB, capacity int64) *CoreStore {
+	t.Helper()
+	return newCapacityStoreWithClock(t, capacity, newManualClock(testTime))
+}
+
+func newCapacityStoreWithClock(t testing.TB, capacity int64, testClock clock) *CoreStore {
+	t.Helper()
+	cfg := compactConfig()
+	cfg.CapacityBytes = capacity
+	return newConfiguredTestStore(t, cfg, testClock, false, func([]byte) uint64 { return 0 })
+}
+
+func newTestStoreWithTouchBuffer(t testing.TB, size int, maintenance bool) *CoreStore {
+	t.Helper()
+	cfg := compactConfig()
+	cfg.TouchBuffer = size
+	return newConfiguredTestStore(t, cfg, newManualClock(testTime), maintenance, func([]byte) uint64 { return 0 })
+}

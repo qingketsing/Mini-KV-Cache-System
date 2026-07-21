@@ -55,69 +55,112 @@ func (s *CoreStore) Put(ctx context.Context, key []byte, source io.Reader, optio
 		return ObjectInfo{}, err
 	}
 
-	shardID := shardIDWithHash(key, s.cfg.ShardCount, s.hash)
-	immutableKey := string(key)
-	target := &s.shards[shardID]
-	target.mu.Lock()
-	if err := ctx.Err(); err != nil {
-		target.mu.Unlock()
+	info, err := s.commitStaged(ctx, key, ref, options)
+	if err != nil {
+		s.rejectPut(ctx)
 		return ObjectInfo{}, err
 	}
-	old := target.entries[immutableKey]
-	cost := options.Size + int64(len(immutableKey)) + entryOverheadBytes
-	delta := cost
-	if old != nil {
-		delta -= old.cost
-	}
-	if delta > 0 && !s.reserveLive(delta) {
-		target.mu.Unlock()
-		s.rejectPut(ctx)
-		return ObjectInfo{}, ErrNoCapacity
-	}
-
-	now := s.clock.Now()
-	expiresAt := int64(0)
-	if options.TTL > 0 {
-		expiresAt = now.Add(options.TTL).UnixNano()
-	}
-	generation := s.generation.Add(1)
-	current := &entry{
-		key:        immutableKey,
-		value:      ref,
-		size:       options.Size,
-		cost:       cost,
-		expiresAt:  expiresAt,
-		generation: generation,
-	}
-	target.entries[immutableKey] = current
-	target.policy.insert(immutableKey, generation, cost)
-	target.bytes += delta
-	if delta < 0 {
-		s.liveBytes.Add(delta)
-	}
-	payloadDelta := options.Size
-	if old != nil {
-		payloadDelta -= old.size
-	} else {
-		s.entryCount.Add(1)
-	}
-	s.payloadBytes.Add(payloadDelta)
-	target.mu.Unlock()
-
 	committed = true
-	if old != nil {
-		s.arena.Release(old.value)
-	}
-	if expiresAt != 0 {
-		s.wheel.schedule(expirationEvent{
-			shardID:    shardID,
+	return info, nil
+}
+
+func (s *CoreStore) commitStaged(ctx context.Context, key []byte, ref ValueRef, options PutOptions) (ObjectInfo, error) {
+	shardID := shardIDWithHash(key, s.cfg.ShardCount, s.hash)
+	immutableKey := string(key)
+	cost := options.Size + int64(len(immutableKey)) + entryOverheadBytes
+	target := &s.shards[shardID]
+
+	for attempt := 0; attempt < maxAdmissionAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return ObjectInfo{}, err
+		}
+		target.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			target.mu.Unlock()
+			return ObjectInfo{}, err
+		}
+		old := target.entries[immutableKey]
+		delta := cost
+		if old != nil {
+			delta -= old.cost
+		}
+		if delta > 0 && !s.reserveLive(delta) {
+			shortage := s.capacityShortage(delta)
+			exclusion := evictionExclusion{}
+			if old != nil {
+				exclusion = evictionExclusion{
+					shardID:    shardID,
+					key:        immutableKey,
+					generation: old.generation,
+					enabled:    true,
+				}
+			}
+			target.mu.Unlock()
+			if attempt+1 < maxAdmissionAttempts {
+				s.makeRoom(ctx, shortage, exclusion)
+			}
+			continue
+		}
+
+		now := s.clock.Now()
+		expiresAt := int64(0)
+		if options.TTL > 0 {
+			expiresAt = now.Add(options.TTL).UnixNano()
+		}
+		generation := s.generation.Add(1)
+		current := &entry{
 			key:        immutableKey,
-			generation: generation,
+			value:      ref,
+			size:       options.Size,
+			cost:       cost,
 			expiresAt:  expiresAt,
-		})
+			generation: generation,
+		}
+		target.entries[immutableKey] = current
+		target.policy.insert(immutableKey, generation, cost)
+		target.bytes += delta
+		if delta < 0 {
+			s.liveBytes.Add(delta)
+		}
+		payloadDelta := options.Size
+		if old != nil {
+			payloadDelta -= old.size
+		} else {
+			s.entryCount.Add(1)
+		}
+		s.payloadBytes.Add(payloadDelta)
+		target.mu.Unlock()
+
+		if old != nil {
+			s.arena.Release(old.value)
+		}
+		if expiresAt != 0 {
+			s.wheel.schedule(expirationEvent{
+				shardID:    shardID,
+				key:        immutableKey,
+				generation: generation,
+				expiresAt:  expiresAt,
+			})
+		}
+		s.counters.puts.Add(1)
+		if s.atHighWatermark() {
+			select {
+			case s.pressure <- struct{}{}:
+			default:
+			}
+		}
+		return ObjectInfo{Size: options.Size, ExpiresAt: timeFromUnixNano(expiresAt)}, nil
 	}
-	s.counters.puts.Add(1)
-	return ObjectInfo{Size: options.Size, ExpiresAt: timeFromUnixNano(expiresAt)}, nil
+	return ObjectInfo{}, ErrNoCapacity
+}
+
+func (s *CoreStore) capacityShortage(delta int64) int64 {
+	available := s.cfg.CapacityBytes - s.liveBytes.Load()
+	shortage := delta - available
+	if shortage < 1 {
+		return 1
+	}
+	return shortage
 }
 
 func (s *CoreStore) Get(ctx context.Context, key []byte) (Object, error) {

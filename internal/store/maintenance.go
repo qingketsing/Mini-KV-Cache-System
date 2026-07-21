@@ -1,6 +1,9 @@
 package store
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 func (s *CoreStore) maintenanceLoop() {
 	ticker := time.NewTicker(s.cfg.TTLResolution)
@@ -24,13 +27,18 @@ func (s *CoreStore) maintenanceStep(now time.Time) {
 		s.expireIfMatch(event.shardID, event.key, event.generation, now.UnixNano())
 	}
 
+drainTouches:
 	for processed := 0; processed < s.cfg.TouchBuffer; processed++ {
 		select {
 		case event := <-s.touches:
 			s.applyTouch(event)
 		default:
-			return
+			break drainTouches
 		}
+	}
+
+	if s.atHighWatermark() {
+		s.evictToLowWatermark(context.Background())
 	}
 }
 

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -122,4 +123,15 @@ func newTestStoreWithTouchBuffer(t testing.TB, size int, maintenance bool) *Core
 	cfg := compactConfig()
 	cfg.TouchBuffer = size
 	return newConfiguredTestStore(t, cfg, newManualClock(testTime), maintenance, func([]byte) uint64 { return 0 })
+}
+
+func waitForActiveOperations(t testing.TB, gate *operationGate, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for gate.activeCount.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("active operations = %d, want %d", gate.activeCount.Load(), want)
+		}
+		runtime.Gosched()
+	}
 }

@@ -107,9 +107,29 @@ func (s *CoreStore) protectedLimit() int64 {
 func (s *CoreStore) Close() error {
 	s.closeOnce.Do(func() {
 		s.gate.closeAdmission()
+		s.staging.close()
 		close(s.stop)
 		s.gate.wait()
 		<-s.maintenanceDone
+
+		refs := make([]ValueRef, 0, int(s.entryCount.Load()))
+		for index := range s.shards {
+			target := &s.shards[index]
+			target.mu.Lock()
+			for _, current := range target.entries {
+				refs = append(refs, current.value)
+			}
+			target.entries = make(map[string]*entry)
+			target.policy = newSLRU(s.protectedLimit())
+			target.bytes = 0
+			target.mu.Unlock()
+		}
+		s.liveBytes.Store(0)
+		s.payloadBytes.Store(0)
+		s.entryCount.Store(0)
+		for _, ref := range refs {
+			s.arena.Release(ref)
+		}
 		s.closeErr = s.arena.Close()
 		close(s.closeDone)
 	})

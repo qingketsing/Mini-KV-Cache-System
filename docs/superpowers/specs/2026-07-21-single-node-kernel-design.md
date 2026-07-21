@@ -243,7 +243,7 @@ Admission cost is deterministic rather than an attempt to report Go process RSS:
 entry cost = payload size + key size + 128 bytes
 ```
 
-Keys map to shards with the protocol-selected XXH3-64 hash and fixed seed:
+Keys map to shards with the protocol-selected XXH3-64 hash and fixed seed zero:
 
 ```text
 shard_id = XXH3_64(key) & (ShardCount - 1)

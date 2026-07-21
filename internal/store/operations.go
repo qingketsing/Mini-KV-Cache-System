@@ -139,8 +139,15 @@ func (s *CoreStore) Get(ctx context.Context, key []byte) (Object, error) {
 	now := s.clock.Now().UnixNano()
 	target.mu.RLock()
 	current := target.entries[immutableKey]
-	if current == nil || current.expired(now) {
+	if current == nil {
 		target.mu.RUnlock()
+		s.counters.misses.Add(1)
+		return nil, ErrNotFound
+	}
+	if current.expired(now) {
+		generation := current.generation
+		target.mu.RUnlock()
+		s.expireIfMatch(shardID, immutableKey, generation, now)
 		s.counters.misses.Add(1)
 		return nil, ErrNotFound
 	}
@@ -180,8 +187,17 @@ func (s *CoreStore) Delete(ctx context.Context, key []byte) (bool, error) {
 	target := &s.shards[shardID]
 	target.mu.Lock()
 	current := target.entries[immutableKey]
-	if current == nil || current.expired(s.clock.Now().UnixNano()) {
+	if current == nil {
 		target.mu.Unlock()
+		return false, nil
+	}
+	if current.expired(s.clock.Now().UnixNano()) {
+		ref, removed := s.removeEntryLocked(target, current)
+		target.mu.Unlock()
+		if removed {
+			s.arena.Release(ref)
+			s.counters.expirations.Add(1)
+		}
 		return false, nil
 	}
 	ref, removed := s.removeEntryLocked(target, current)

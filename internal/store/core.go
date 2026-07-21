@@ -87,9 +87,11 @@ func newCoreStore(cfg Config, dependencies coreDependencies) (*CoreStore, error)
 		store.shards[index].policy = newSLRU(store.protectedLimit())
 	}
 
-	// Maintenance is attached after its behavior is introduced. Keeping this
-	// channel closed preserves deterministic lifecycle behavior in this stage.
-	close(store.maintenanceDone)
+	if dependencies.startMaintenance {
+		go store.maintenanceLoop()
+	} else {
+		close(store.maintenanceDone)
+	}
 	return store, nil
 }
 
@@ -105,7 +107,9 @@ func (s *CoreStore) protectedLimit() int64 {
 func (s *CoreStore) Close() error {
 	s.closeOnce.Do(func() {
 		s.gate.closeAdmission()
+		close(s.stop)
 		s.gate.wait()
+		<-s.maintenanceDone
 		s.closeErr = s.arena.Close()
 		close(s.closeDone)
 	})

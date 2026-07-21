@@ -22,3 +22,6 @@ Thumbs.db
 
 # Local architecture brainstorming sessions
 .superpowers/
+
+# Local Git worktrees
+.worktrees/

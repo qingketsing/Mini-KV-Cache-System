@@ -46,6 +46,7 @@ func (a *HeapArena) Write(ctx context.Context, src io.Reader, size int64) (Value
 	chunkCount := (size + int64(a.chunkBytes) - 1) / int64(a.chunkBytes)
 	chunks := make([][]byte, 0, int(chunkCount))
 	remaining := size
+	sourceEOF := false
 	for remaining > 0 {
 		if err := ctx.Err(); err != nil {
 			return ValueRef{}, err
@@ -56,18 +57,20 @@ func (a *HeapArena) Write(ctx context.Context, src io.Reader, size int64) (Value
 			chunkSize = remaining
 		}
 		chunk := make([]byte, int(chunkSize))
-		if _, err := io.ReadFull(src, chunk); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				return ValueRef{}, ErrSizeMismatch
-			}
-			return ValueRef{}, fmt.Errorf("read value: %w", err)
+		var err error
+		sourceEOF, err = readArenaChunk(ctx, src, chunk)
+		if err != nil {
+			return ValueRef{}, err
 		}
 		chunks = append(chunks, chunk)
 		remaining -= chunkSize
+		if sourceEOF && remaining != 0 {
+			return ValueRef{}, ErrSizeMismatch
+		}
 	}
 
 	var probe [1]byte
-	for {
+	for !sourceEOF {
 		if err := ctx.Err(); err != nil {
 			return ValueRef{}, err
 		}
@@ -82,10 +85,38 @@ func (a *HeapArena) Write(ctx context.Context, src io.Reader, size int64) (Value
 			return ValueRef{}, fmt.Errorf("probe value: %w", err)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return ValueRef{}, err
+	}
 
 	value := &heapValue{chunks: chunks, size: size}
 	value.refs.Store(1)
 	return ValueRef{handle: value}, nil
+}
+
+func readArenaChunk(ctx context.Context, src io.Reader, chunk []byte) (bool, error) {
+	read := 0
+	for read < len(chunk) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		n, err := src.Read(chunk[read:])
+		if n < 0 || n > len(chunk)-read {
+			return false, fmt.Errorf("read value: invalid byte count %d", n)
+		}
+		read += n
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			if read != len(chunk) {
+				return false, ErrSizeMismatch
+			}
+			return true, nil
+		}
+		return false, fmt.Errorf("read value: %w", err)
+	}
+	return false, nil
 }
 
 // Open pins a value until the returned reader is closed.

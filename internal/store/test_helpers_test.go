@@ -18,6 +18,12 @@ func (f readerFunc) Read(p []byte) (int, error) {
 	return f(p)
 }
 
+type clockFunc func() time.Time
+
+func (f clockFunc) Now() time.Time {
+	return f()
+}
+
 type manualClock struct {
 	mu  sync.Mutex
 	now time.Time

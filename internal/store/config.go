@@ -59,7 +59,8 @@ func (c Config) validate() error {
 	if c.MaxObjectBytes <= 0 {
 		return fmt.Errorf("max object bytes must be positive")
 	}
-	if c.CapacityBytes < c.MaxObjectBytes+maxKeyBytes+entryOverheadBytes {
+	entryMetadata := int64(maxKeyBytes) + entryOverheadBytes
+	if c.CapacityBytes < entryMetadata || c.MaxObjectBytes > c.CapacityBytes-entryMetadata {
 		return fmt.Errorf("capacity cannot fit maximum object")
 	}
 	if c.MaxStagingBytes < c.MaxObjectBytes {
@@ -78,4 +79,16 @@ func (c Config) validate() error {
 		return fmt.Errorf("touch buffer must be positive")
 	}
 	return nil
+}
+
+func percentageFloor(value, numerator, denominator int64) int64 {
+	return value/denominator*numerator + value%denominator*numerator/denominator
+}
+
+func percentageCeil(value, numerator, denominator int64) int64 {
+	result := percentageFloor(value, numerator, denominator)
+	if value%denominator*numerator%denominator != 0 {
+		result++
+	}
+	return result
 }

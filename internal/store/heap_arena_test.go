@@ -113,6 +113,47 @@ func TestHeapArenaPreservesSourceError(t *testing.T) {
 	}
 }
 
+func TestHeapArenaPreservesErrorReturnedWithFinalBytes(t *testing.T) {
+	arena := NewHeapArena(4)
+	sourceErr := errors.New("source failed after payload")
+	read := false
+	src := readerFunc(func(p []byte) (int, error) {
+		if read {
+			return 0, io.EOF
+		}
+		read = true
+		return copy(p, "data"), sourceErr
+	})
+
+	if _, err := arena.Write(context.Background(), src, 4); !errors.Is(err, sourceErr) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestHeapArenaObservesCancellationAfterFinalReadWithEOF(t *testing.T) {
+	arena := NewHeapArena(4)
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	src := readerFunc(func(p []byte) (int, error) {
+		close(started)
+		<-release
+		return copy(p, "data"), io.EOF
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := arena.Write(ctx, src, 4)
+		result <- err
+	}()
+	<-started
+	cancel()
+	close(release)
+
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestHeapArenaOpenAfterCloseFails(t *testing.T) {
 	arena := NewHeapArena(4)
 	ref, err := arena.Write(context.Background(), strings.NewReader("data"), 4)

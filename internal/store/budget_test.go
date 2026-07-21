@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestByteBudgetBlocksUntilRelease(t *testing.T) {
@@ -35,6 +37,19 @@ func TestByteBudgetBlocksUntilRelease(t *testing.T) {
 	if got := budget.usedBytes(); got != 0 {
 		t.Fatalf("used = %d", got)
 	}
+}
+
+func TestByteBudgetDoesNotOverflowAvailableCapacity(t *testing.T) {
+	budget := newByteBudget(math.MaxInt64)
+	if err := budget.reserve(context.Background(), math.MaxInt64-1); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := budget.reserve(ctx, 10); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v", err)
+	}
+	budget.release(math.MaxInt64 - 1)
 }
 
 func TestByteBudgetCancellationAndClose(t *testing.T) {

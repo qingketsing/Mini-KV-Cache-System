@@ -1,6 +1,7 @@
 package store
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -25,6 +26,40 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.TTLResolution != time.Second {
 		t.Fatalf("ttl resolution = %s", cfg.TTLResolution)
+	}
+}
+
+func TestConfigValidationRejectsOverflowingObjectFit(t *testing.T) {
+	cfg := Config{
+		CapacityBytes:   math.MaxInt64,
+		MaxObjectBytes:  math.MaxInt64 - 100,
+		MaxStagingBytes: math.MaxInt64,
+		ChunkBytes:      1,
+		ShardCount:      1,
+		TTLResolution:   time.Second,
+		TouchBuffer:     1,
+	}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("expected object fit validation error")
+	}
+}
+
+func TestCapacityPercentagesDoNotOverflow(t *testing.T) {
+	capacity := int64(math.MaxInt64)
+	store := &CoreStore{cfg: Config{CapacityBytes: capacity, ShardCount: 1}}
+	wantProtected := capacity/5*4 + capacity%5*4/5
+	if got := store.protectedLimit(); got != wantProtected {
+		t.Fatalf("protected limit = %d, want %d", got, wantProtected)
+	}
+
+	highWatermark := capacity/100*95 + (capacity%100*95+99)/100
+	store.liveBytes.Store(highWatermark - 1)
+	if store.atHighWatermark() {
+		t.Fatal("value below high watermark reported pressure")
+	}
+	store.liveBytes.Store(highWatermark)
+	if !store.atHighWatermark() {
+		t.Fatal("high watermark was not detected")
 	}
 }
 

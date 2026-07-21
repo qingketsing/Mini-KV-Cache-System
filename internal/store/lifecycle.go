@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 )
@@ -37,4 +38,33 @@ func (g *operationGate) closeAdmission() {
 
 func (g *operationGate) wait() {
 	g.active.Wait()
+}
+
+func (s *CoreStore) operationContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	stopLifecycleLink := context.AfterFunc(s.lifecycleCtx, cancel)
+	return ctx, func() {
+		stopLifecycleLink()
+		cancel()
+	}
+}
+
+func (s *CoreStore) cancellationError(parent context.Context) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	if s.lifecycleCtx.Err() != nil {
+		return ErrClosed
+	}
+	return nil
+}
+
+func (s *CoreStore) normalizeOperationError(parent context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if cancellationErr := s.cancellationError(parent); cancellationErr != nil {
+		return cancellationErr
+	}
+	return err
 }

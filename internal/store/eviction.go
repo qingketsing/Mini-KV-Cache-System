@@ -42,9 +42,9 @@ func (s *CoreStore) makeRoom(ctx context.Context, needed int64, exclusion evicti
 		shardID := s.evictionCursor & (s.cfg.ShardCount - 1)
 		s.evictionCursor++
 		removed, bytes := s.evictFromShard(
+			ctx,
 			shardID,
 			exclusion.forShard(shardID),
-			s.clock.Now().UnixNano(),
 			needed-freed,
 		)
 		if removed == 0 {
@@ -58,7 +58,7 @@ func (s *CoreStore) makeRoom(ctx context.Context, needed int64, exclusion evicti
 	return freed
 }
 
-func (s *CoreStore) evictFromShard(shardID uint32, exclusion policyExclusion, now, needed int64) (int64, int64) {
+func (s *CoreStore) evictFromShard(ctx context.Context, shardID uint32, exclusion policyExclusion, needed int64) (int64, int64) {
 	target := &s.shards[shardID]
 	var refs []ValueRef
 	var freed int64
@@ -67,6 +67,11 @@ func (s *CoreStore) evictFromShard(shardID uint32, exclusion policyExclusion, no
 	var evictions uint64
 
 	target.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		target.mu.Unlock()
+		return 0, 0
+	}
+	now := s.clock.Now().UnixNano()
 	for _, current := range target.entries {
 		if !current.expired(now) {
 			continue
@@ -119,7 +124,7 @@ func (s *CoreStore) evictFromShard(shardID uint32, exclusion policyExclusion, no
 }
 
 func (s *CoreStore) evictToLowWatermark(ctx context.Context) {
-	low := s.cfg.CapacityBytes * lowWatermarkNumerator / watermarkDenominator
+	low := percentageFloor(s.cfg.CapacityBytes, lowWatermarkNumerator, watermarkDenominator)
 	used := s.liveBytes.Load()
 	if used <= low {
 		return
@@ -128,5 +133,6 @@ func (s *CoreStore) evictToLowWatermark(ctx context.Context) {
 }
 
 func (s *CoreStore) atHighWatermark() bool {
-	return s.liveBytes.Load()*watermarkDenominator >= s.cfg.CapacityBytes*highWatermarkNumerator
+	high := percentageCeil(s.cfg.CapacityBytes, highWatermarkNumerator, watermarkDenominator)
+	return s.liveBytes.Load() >= high
 }

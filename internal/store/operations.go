@@ -10,40 +10,47 @@ import (
 
 func (s *CoreStore) Put(ctx context.Context, key []byte, source io.Reader, options PutOptions) (ObjectInfo, error) {
 	if err := s.gate.enter(); err != nil {
+		s.rejectPut(err)
 		return ObjectInfo{}, err
 	}
 	defer s.gate.leave()
+	callerCtx := ctx
+	ctx, cancel := s.operationContext(callerCtx)
+	defer cancel()
 
-	if err := ctx.Err(); err != nil {
+	if err := s.cancellationError(callerCtx); err != nil {
+		s.rejectPut(err)
 		return ObjectInfo{}, err
 	}
 	if err := validateKey(key); err != nil {
-		s.rejectPut(ctx)
+		s.rejectPut(err)
 		return ObjectInfo{}, err
 	}
 	if options.Size < 0 {
-		s.rejectPut(ctx)
+		s.rejectPut(ErrSizeMismatch)
 		return ObjectInfo{}, ErrSizeMismatch
 	}
 	if options.Size > s.cfg.MaxObjectBytes {
-		s.rejectPut(ctx)
+		s.rejectPut(ErrObjectTooLarge)
 		return ObjectInfo{}, ErrObjectTooLarge
 	}
 	if options.TTL < 0 {
-		s.rejectPut(ctx)
+		s.rejectPut(ErrInvalidTTL)
 		return ObjectInfo{}, ErrInvalidTTL
 	}
 
 	if err := s.staging.reserve(ctx, options.Size); err != nil {
-		s.rejectPut(ctx)
-		return ObjectInfo{}, err
+		publicErr := s.normalizeOperationError(callerCtx, err)
+		s.rejectPut(publicErr)
+		return ObjectInfo{}, publicErr
 	}
 	defer s.staging.release(options.Size)
 
 	ref, err := s.arena.Write(ctx, source, options.Size)
 	if err != nil {
-		s.rejectPut(ctx)
-		return ObjectInfo{}, err
+		publicErr := s.normalizeOperationError(callerCtx, err)
+		s.rejectPut(publicErr)
+		return ObjectInfo{}, publicErr
 	}
 	committed := false
 	defer func() {
@@ -52,13 +59,16 @@ func (s *CoreStore) Put(ctx context.Context, key []byte, source io.Reader, optio
 		}
 	}()
 	if err := ctx.Err(); err != nil {
-		return ObjectInfo{}, err
+		publicErr := s.normalizeOperationError(callerCtx, err)
+		s.rejectPut(publicErr)
+		return ObjectInfo{}, publicErr
 	}
 
 	info, err := s.commitStaged(ctx, key, ref, options)
 	if err != nil {
-		s.rejectPut(ctx)
-		return ObjectInfo{}, err
+		publicErr := s.normalizeOperationError(callerCtx, err)
+		s.rejectPut(publicErr)
+		return ObjectInfo{}, publicErr
 	}
 	committed = true
 	return info, nil
@@ -168,7 +178,7 @@ func (s *CoreStore) Get(ctx context.Context, key []byte) (Object, error) {
 		return nil, err
 	}
 	defer s.gate.leave()
-	if err := ctx.Err(); err != nil {
+	if err := s.cancellationError(ctx); err != nil {
 		return nil, err
 	}
 	if err := validateKey(key); err != nil {
@@ -179,8 +189,12 @@ func (s *CoreStore) Get(ctx context.Context, key []byte) (Object, error) {
 	shardID := shardIDWithHash(key, s.cfg.ShardCount, s.hash)
 	immutableKey := string(key)
 	target := &s.shards[shardID]
-	now := s.clock.Now().UnixNano()
 	target.mu.RLock()
+	if err := s.cancellationError(ctx); err != nil {
+		target.mu.RUnlock()
+		return nil, err
+	}
+	now := s.clock.Now().UnixNano()
 	current := target.entries[immutableKey]
 	if current == nil {
 		target.mu.RUnlock()
@@ -218,7 +232,7 @@ func (s *CoreStore) Delete(ctx context.Context, key []byte) (bool, error) {
 		return false, err
 	}
 	defer s.gate.leave()
-	if err := ctx.Err(); err != nil {
+	if err := s.cancellationError(ctx); err != nil {
 		return false, err
 	}
 	if err := validateKey(key); err != nil {
@@ -229,6 +243,10 @@ func (s *CoreStore) Delete(ctx context.Context, key []byte) (bool, error) {
 	immutableKey := string(key)
 	target := &s.shards[shardID]
 	target.mu.Lock()
+	if err := s.cancellationError(ctx); err != nil {
+		target.mu.Unlock()
+		return false, err
+	}
 	current := target.entries[immutableKey]
 	if current == nil {
 		target.mu.Unlock()
@@ -265,8 +283,8 @@ func (s *CoreStore) reserveLive(delta int64) bool {
 	}
 }
 
-func (s *CoreStore) rejectPut(ctx context.Context) {
-	if !errors.Is(ctx.Err(), context.Canceled) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+func (s *CoreStore) rejectPut(err error) {
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		s.counters.rejectedPuts.Add(1)
 	}
 }

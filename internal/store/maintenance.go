@@ -1,9 +1,6 @@
 package store
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 func (s *CoreStore) maintenanceLoop() {
 	ticker := time.NewTicker(s.cfg.TTLResolution)
@@ -38,7 +35,7 @@ drainTouches:
 	}
 
 	if s.atHighWatermark() {
-		s.evictToLowWatermark(context.Background())
+		s.evictToLowWatermark(s.lifecycleCtx)
 	}
 }
 

@@ -79,6 +79,59 @@ func TestCloseWakesStagingWaiter(t *testing.T) {
 	}
 }
 
+func TestCloseCancelsPutBeforeCommit(t *testing.T) {
+	store := newTestStore(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	read := false
+	source := readerFunc(func(p []byte) (int, error) {
+		if read {
+			return 0, io.EOF
+		}
+		read = true
+		close(started)
+		<-release
+		p[0] = 'x'
+		return 1, nil
+	})
+	putDone := make(chan error, 1)
+	go func() {
+		_, err := store.Put(context.Background(), []byte("k"), source, PutOptions{Size: 1})
+		putDone <- err
+	}()
+	<-started
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- store.Close()
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		store.staging.mu.Lock()
+		closed := store.staging.closed
+		store.staging.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close did not reach lifecycle cancellation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+
+	if err := <-putDone; !errors.Is(err, ErrClosed) {
+		t.Fatalf("put error = %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	stats := store.Stats()
+	if stats.Puts != 0 || stats.RejectedPuts != 1 {
+		t.Fatalf("stats = %+v", stats)
+	}
+}
+
 func TestCloseReleasesIndexOwnershipButNotOpenReader(t *testing.T) {
 	store := newTestStore(t)
 	putString(t, store, "k", "value")

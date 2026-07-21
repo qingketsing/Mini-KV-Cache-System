@@ -115,6 +115,40 @@ func TestPressureRemovesExpiredBeforeLiveVictim(t *testing.T) {
 	}
 }
 
+func TestPressureSamplesExpirationWhileHoldingShardLock(t *testing.T) {
+	const valueBytes = 960
+	store := newCapacityStoreWithClock(t, 2*costFor("a", valueBytes), newManualClock(testTime))
+	putString(t, store, "b", strings.Repeat("b", valueBytes))
+	if _, err := store.Put(context.Background(), []byte("a"), strings.NewReader(strings.Repeat("a", valueBytes)), PutOptions{Size: valueBytes, TTL: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+
+	target := &store.shards[0]
+	clockChecked := false
+	clockHeldWriteLock := false
+	store.clock = clockFunc(func() time.Time {
+		clockChecked = true
+		if target.mu.TryLock() {
+			target.mu.Unlock()
+		} else {
+			clockHeldWriteLock = true
+		}
+		return testTime.Add(time.Second)
+	})
+
+	if freed := store.makeRoom(context.Background(), costFor("a", valueBytes), evictionExclusion{}); freed < costFor("a", valueBytes) {
+		t.Fatalf("freed = %d", freed)
+	}
+	if !clockChecked || !clockHeldWriteLock {
+		t.Fatalf("clock checked=%v held write lock=%v", clockChecked, clockHeldWriteLock)
+	}
+	assertValue(t, store, "b", strings.Repeat("b", valueBytes))
+	stats := store.Stats()
+	if stats.Expirations != 1 || stats.Evictions != 0 {
+		t.Fatalf("stats = %+v", stats)
+	}
+}
+
 func TestReaderSurvivesEviction(t *testing.T) {
 	const valueBytes = 960
 	store := newCapacityTestStore(t, 2*costFor("a", valueBytes))

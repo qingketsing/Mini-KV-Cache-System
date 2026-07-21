@@ -76,6 +76,31 @@ func TestCoreStorePutIsInvisibleUntilCommit(t *testing.T) {
 	assertValue(t, store, "key", "abcd")
 }
 
+func TestConcurrentSameKeyPutsUseLastCommitWins(t *testing.T) {
+	store := newTestStore(t)
+	reader, writer := io.Pipe()
+	first := make(chan error, 1)
+	go func() {
+		_, err := store.Put(context.Background(), []byte("k"), reader, PutOptions{Size: 3})
+		first <- err
+	}()
+
+	if _, err := writer.Write([]byte("o")); err != nil {
+		t.Fatal(err)
+	}
+	putString(t, store, "k", "new")
+	if _, err := writer.Write([]byte("ld")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	assertValue(t, store, "k", "old")
+}
+
 func TestCoreStoreReaderSurvivesOverwriteAndDelete(t *testing.T) {
 	store := newTestStore(t)
 	putString(t, store, "k", "old")
@@ -198,4 +223,62 @@ func TestCoreStoreCanceledPutDoesNotRead(t *testing.T) {
 	if got := store.Stats().RejectedPuts; got != 0 {
 		t.Fatalf("rejected puts = %d", got)
 	}
+}
+
+func TestGetObservesCancellationWhileWaitingForShardLock(t *testing.T) {
+	store := newTestStore(t)
+	putString(t, store, "k", "value")
+	shardID := shardIDWithHash([]byte("k"), store.cfg.ShardCount, store.hash)
+	target := &store.shards[shardID]
+	target.mu.Lock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type getResult struct {
+		object Object
+		err    error
+	}
+	result := make(chan getResult, 1)
+	go func() {
+		object, err := store.Get(ctx, []byte("k"))
+		result <- getResult{object: object, err: err}
+	}()
+	waitForActiveOperations(t, &store.gate, 1)
+	cancel()
+	target.mu.Unlock()
+
+	got := <-result
+	if got.object != nil {
+		got.object.Close()
+	}
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("error = %v", got.err)
+	}
+}
+
+func TestDeleteObservesCancellationWhileWaitingForShardLock(t *testing.T) {
+	store := newTestStore(t)
+	putString(t, store, "k", "value")
+	shardID := shardIDWithHash([]byte("k"), store.cfg.ShardCount, store.hash)
+	target := &store.shards[shardID]
+	target.mu.Lock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type deleteResult struct {
+		deleted bool
+		err     error
+	}
+	result := make(chan deleteResult, 1)
+	go func() {
+		deleted, err := store.Delete(ctx, []byte("k"))
+		result <- deleteResult{deleted: deleted, err: err}
+	}()
+	waitForActiveOperations(t, &store.gate, 1)
+	cancel()
+	target.mu.Unlock()
+
+	got := <-result
+	if got.deleted || !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("deleted=%v error=%v", got.deleted, got.err)
+	}
+	assertValue(t, store, "k", "value")
 }

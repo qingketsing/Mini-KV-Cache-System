@@ -39,7 +39,7 @@ func (b *byteBudget) reserve(ctx context.Context, size int64) error {
 			b.mu.Unlock()
 			return ErrClosed
 		}
-		if b.used+size <= b.limit {
+		if b.used <= b.limit && size <= b.limit-b.used {
 			b.used += size
 			b.mu.Unlock()
 			return nil

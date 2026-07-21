@@ -52,6 +52,34 @@ func TestTTLStartsAtCommitAndLazyGetNeverReturnsExpiredValue(t *testing.T) {
 	}
 }
 
+func TestGetSamplesTTLWhileHoldingShardReadLock(t *testing.T) {
+	store := newTestStoreWithClock(t, newManualClock(testTime), false)
+	if _, err := store.Put(context.Background(), []byte("k"), strings.NewReader("v"), PutOptions{Size: 1, TTL: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+
+	shardID := shardIDWithHash([]byte("k"), store.cfg.ShardCount, store.hash)
+	target := &store.shards[shardID]
+	clockChecked := false
+	clockHeldReadLock := false
+	store.clock = clockFunc(func() time.Time {
+		clockChecked = true
+		if target.mu.TryLock() {
+			target.mu.Unlock()
+		} else {
+			clockHeldReadLock = true
+		}
+		return testTime.Add(time.Second)
+	})
+
+	if _, err := store.Get(context.Background(), []byte("k")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v", err)
+	}
+	if !clockChecked || !clockHeldReadLock {
+		t.Fatalf("clock checked=%v held read lock=%v", clockChecked, clockHeldReadLock)
+	}
+}
+
 func TestStaleExpirationCannotDeleteReplacement(t *testing.T) {
 	testClock := newManualClock(testTime)
 	store := newTestStoreWithClock(t, testClock, false)

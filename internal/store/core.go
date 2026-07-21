@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -33,7 +34,9 @@ type CoreStore struct {
 	entryCount   atomic.Int64
 	counters     storeCounters
 
-	gate operationGate
+	gate            operationGate
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
 
 	stop            chan struct{}
 	maintenanceDone chan struct{}
@@ -68,6 +71,7 @@ func newCoreStore(cfg Config, dependencies coreDependencies) (*CoreStore, error)
 		dependencies.hash = protocolHash
 	}
 
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	store := &CoreStore{
 		cfg:             cfg,
 		arena:           dependencies.arena,
@@ -80,6 +84,8 @@ func newCoreStore(cfg Config, dependencies coreDependencies) (*CoreStore, error)
 		stop:            make(chan struct{}),
 		maintenanceDone: make(chan struct{}),
 		closeDone:       make(chan struct{}),
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
 	}
 	store.wheel = newTimingWheel(cfg.TTLResolution, store.clock.Now(), defaultTimingWheelSlots)
 	for index := range store.shards {
@@ -97,7 +103,7 @@ func newCoreStore(cfg Config, dependencies coreDependencies) (*CoreStore, error)
 
 func (s *CoreStore) protectedLimit() int64 {
 	nominal := s.cfg.CapacityBytes / int64(s.cfg.ShardCount)
-	limit := nominal * 80 / 100
+	limit := percentageFloor(nominal, 80, 100)
 	if limit < 1 {
 		return 1
 	}
@@ -107,6 +113,7 @@ func (s *CoreStore) protectedLimit() int64 {
 func (s *CoreStore) Close() error {
 	s.closeOnce.Do(func() {
 		s.gate.closeAdmission()
+		s.lifecycleCancel()
 		s.staging.close()
 		close(s.stop)
 		s.gate.wait()

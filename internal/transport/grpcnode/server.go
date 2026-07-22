@@ -2,6 +2,7 @@ package grpcnode
 
 import (
 	"fmt"
+	"reflect"
 
 	minikvv1 "github.com/qingketsing/Mini-KV-Cache-System/gen/go/minikv/v1"
 	"github.com/qingketsing/Mini-KV-Cache-System/internal/sharding"
@@ -19,7 +20,7 @@ type Server struct {
 
 // New validates local dependencies and constructs a node transport server.
 func New(st store.Store, limits grpccommon.Limits, shardCount uint32) (*Server, error) {
-	if st == nil {
+	if isNilStore(st) {
 		return nil, fmt.Errorf("grpcnode: store is required")
 	}
 	if err := limits.Validate(); err != nil {
@@ -29,4 +30,17 @@ func New(st store.Store, limits grpccommon.Limits, shardCount uint32) (*Server, 
 		return nil, fmt.Errorf("grpcnode: shard count: %w", err)
 	}
 	return &Server{store: st, limits: limits, shardCount: shardCount}, nil
+}
+
+func isNilStore(st store.Store) bool {
+	if st == nil {
+		return true
+	}
+	value := reflect.ValueOf(st)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }

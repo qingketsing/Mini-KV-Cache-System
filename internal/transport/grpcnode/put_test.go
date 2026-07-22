@@ -50,6 +50,14 @@ func TestNodePutConstructor(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("typed nil store", func(t *testing.T) {
+		var typedNil *store.CoreStore
+		server, err := New(typedNil, testLimits, testShardCount)
+		if err == nil || server != nil {
+			t.Fatalf("New(typed nil) = (%v, %v), want (nil, error)", server, err)
+		}
+	})
 }
 
 func TestNodePutDirectHandlerContract(t *testing.T) {

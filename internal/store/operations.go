@@ -6,6 +6,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/qingketsing/Mini-KV-Cache-System/internal/sharding"
 )
 
 func (s *CoreStore) Put(ctx context.Context, key []byte, source io.Reader, options PutOptions) (ObjectInfo, error) {
@@ -75,7 +77,7 @@ func (s *CoreStore) Put(ctx context.Context, key []byte, source io.Reader, optio
 }
 
 func (s *CoreStore) commitStaged(ctx context.Context, key []byte, ref ValueRef, options PutOptions) (ObjectInfo, error) {
-	shardID := shardIDWithHash(key, s.cfg.ShardCount, s.hash)
+	shardID := sharding.IDWithHash(key, s.cfg.ShardCount, s.hash)
 	immutableKey := string(key)
 	cost := options.Size + int64(len(immutableKey)) + entryOverheadBytes
 	target := &s.shards[shardID]
@@ -186,7 +188,7 @@ func (s *CoreStore) Get(ctx context.Context, key []byte) (Object, error) {
 	}
 
 	s.counters.gets.Add(1)
-	shardID := shardIDWithHash(key, s.cfg.ShardCount, s.hash)
+	shardID := sharding.IDWithHash(key, s.cfg.ShardCount, s.hash)
 	immutableKey := string(key)
 	target := &s.shards[shardID]
 	target.mu.RLock()
@@ -239,7 +241,7 @@ func (s *CoreStore) Delete(ctx context.Context, key []byte) (bool, error) {
 		return false, err
 	}
 
-	shardID := shardIDWithHash(key, s.cfg.ShardCount, s.hash)
+	shardID := sharding.IDWithHash(key, s.cfg.ShardCount, s.hash)
 	immutableKey := string(key)
 	target := &s.shards[shardID]
 	target.mu.Lock()

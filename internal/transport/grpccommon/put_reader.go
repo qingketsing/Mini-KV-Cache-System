@@ -9,6 +9,8 @@ import (
 	minikvv1 "github.com/qingketsing/Mini-KV-Cache-System/gen/go/minikv/v1"
 )
 
+var errNilReceive = errors.New("grpccommon: nil receive callback")
+
 type nodePutReader struct {
 	ctx              context.Context
 	remaining        int64
@@ -39,6 +41,9 @@ func (r *nodePutReader) Read(buffer []byte) (int, error) {
 	}
 	if r.terminalErr != nil {
 		return 0, r.terminalErr
+	}
+	if r.receive == nil {
+		return r.fail(0, errNilReceive)
 	}
 
 	read := 0

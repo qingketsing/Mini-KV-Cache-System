@@ -185,6 +185,58 @@ func TestNodePutReaderPropagatesReceiveError(t *testing.T) {
 	requireReaderError(t, reader, want)
 }
 
+func TestNodePutReaderNilReceive(t *testing.T) {
+	t.Parallel()
+
+	reader := NewNodePutReader(context.Background(), 1, 1, nil)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Read() panicked with nil receive callback: %v", recovered)
+		}
+	}()
+
+	buffer := make([]byte, 1)
+	n, firstErr := reader.Read(buffer)
+	if n != 0 || firstErr == nil {
+		t.Fatalf("first Read() = (%d, %v), want (0, non-nil error)", n, firstErr)
+	}
+	n, secondErr := reader.Read(buffer)
+	if n != 0 || secondErr != firstErr {
+		t.Fatalf("second Read() = (%d, %v), want (0, same error %v)", n, secondErr, firstErr)
+	}
+}
+
+func TestNodePutReaderSticksReceiveErrorAfterPartialRead(t *testing.T) {
+	t.Parallel()
+
+	want := errors.New("receive failed after data")
+	calls := 0
+	reader := NewNodePutReader(context.Background(), 3, 2, func() (*minikvv1.NodePutRequest, error) {
+		calls++
+		if calls == 1 {
+			return nodeChunk(0, "ab"), nil
+		}
+		return nil, want
+	})
+
+	buffer := make([]byte, 3)
+	n, err := reader.Read(buffer)
+	if n != 2 || string(buffer[:n]) != "ab" || err != want {
+		t.Fatalf("first Read() = (%d, %q, %v), want (2, %q, %v)", n, buffer[:n], err, "ab", want)
+	}
+	if calls != 2 {
+		t.Fatalf("receive calls after first Read() = %d, want 2", calls)
+	}
+
+	n, err = reader.Read(buffer)
+	if n != 0 || err != want {
+		t.Fatalf("second Read() = (%d, %v), want (0, %v)", n, err, want)
+	}
+	if calls != 2 {
+		t.Fatalf("receive calls after terminal Read() = %d, want 2", calls)
+	}
+}
+
 func nodeReceiver(frames ...*minikvv1.NodePutRequest) (func() (*minikvv1.NodePutRequest, error), *int) {
 	index := 0
 	calls := 0

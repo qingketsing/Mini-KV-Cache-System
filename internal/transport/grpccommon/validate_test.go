@@ -45,6 +45,8 @@ func TestLimitsValidate(t *testing.T) {
 		{name: "chunk exceeds framed message", limits: Limits{ChunkBytes: 2, MaxMessageBytes: (64 << 10) + 1, MaxObjectBytes: 2}},
 		{name: "chunk exceeds object", limits: Limits{ChunkBytes: 2, MaxMessageBytes: (64 << 10) + 2, MaxObjectBytes: 1}},
 		{name: "boundary", limits: Limits{ChunkBytes: 7, MaxMessageBytes: (64 << 10) + 7, MaxObjectBytes: 7}, wantOK: true},
+		{name: "maximum sequence space", limits: Limits{ChunkBytes: 1, MaxMessageBytes: (64 << 10) + 1, MaxObjectBytes: int64(math.MaxUint32) + 1}, wantOK: true},
+		{name: "object exceeds sequence space", limits: Limits{ChunkBytes: 1, MaxMessageBytes: (64 << 10) + 1, MaxObjectBytes: int64(math.MaxUint32) + 2}},
 	}
 
 	for _, test := range tests {
@@ -90,7 +92,7 @@ func TestParsePutHeader(t *testing.T) {
 		{name: "nil header", header: nil, limits: limits, want: errMalformedHeader},
 		{name: "zero value", header: &minikvv1.PutHeader{Key: []byte("k")}, limits: limits},
 		{name: "size over object max", header: &minikvv1.PutHeader{Key: []byte("k"), ValueSize: uint64(limits.MaxObjectBytes) + 1}, limits: limits, want: store.ErrObjectTooLarge},
-		{name: "size above max int64", header: &minikvv1.PutHeader{Key: []byte("k"), ValueSize: uint64(math.MaxInt64) + 1}, limits: Limits{ChunkBytes: 1, MaxMessageBytes: (64 << 10) + 1, MaxObjectBytes: math.MaxInt64}, want: store.ErrObjectTooLarge},
+		{name: "size above max int64", header: &minikvv1.PutHeader{Key: []byte("k"), ValueSize: uint64(math.MaxInt64) + 1}, limits: Limits{ChunkBytes: 1, MaxMessageBytes: (64 << 10) + 1, MaxObjectBytes: int64(math.MaxUint32) + 1}, want: store.ErrObjectTooLarge},
 		{name: "ttl at boundary", header: &minikvv1.PutHeader{Key: []byte("k"), TtlMilliseconds: uint64(math.MaxInt64 / int64(time.Millisecond))}, limits: limits},
 		{name: "ttl overflow", header: &minikvv1.PutHeader{Key: []byte("k"), TtlMilliseconds: uint64(math.MaxInt64/int64(time.Millisecond)) + 1}, limits: limits, want: store.ErrInvalidTTL},
 		{name: "request id omitted", header: &minikvv1.PutHeader{Key: []byte("k")}, limits: limits},

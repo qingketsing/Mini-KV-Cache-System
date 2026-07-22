@@ -33,7 +33,7 @@ func StatusError(err error) error {
 		return status.Error(codes.Unavailable, "cache node unavailable")
 	}
 
-	if grpcStatus, ok := status.FromError(err); ok && grpcStatus.Code() != codes.Unknown {
+	if grpcStatus, ok := status.FromError(err); ok && grpcStatus != nil && preservableStatusCode(grpcStatus.Code()) {
 		return status.Error(grpcStatus.Code(), "request failed")
 	}
 	return status.Error(codes.Internal, "internal error")
@@ -49,10 +49,14 @@ func BackendStatus(ctx context.Context, err error) error {
 			return StatusError(contextErr)
 		}
 	}
-	if grpcStatus, ok := status.FromError(err); ok && grpcStatus.Code() != codes.Unknown {
+	if grpcStatus, ok := status.FromError(err); ok && grpcStatus != nil && preservableStatusCode(grpcStatus.Code()) {
 		return status.Error(grpcStatus.Code(), "backend request failed")
 	}
 	return status.Error(codes.Internal, "internal error")
+}
+
+func preservableStatusCode(code codes.Code) bool {
+	return code == codes.Canceled || code >= codes.InvalidArgument && code <= codes.Unauthenticated
 }
 
 func isMalformed(err error) bool {

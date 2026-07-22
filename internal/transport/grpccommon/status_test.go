@@ -86,6 +86,44 @@ func TestStatusErrorPreservesCodeAndSanitizesMessage(t *testing.T) {
 	assertSanitized(t, got.Message())
 }
 
+func TestStatusMappersRejectInvalidGRPCCodes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		code codes.Code
+	}{
+		{name: "ok", code: codes.OK},
+		{name: "unknown", code: codes.Unknown},
+		{name: "out of range", code: codes.Code(99)},
+		{name: "negative representation", code: codes.Code(^uint32(0))},
+	}
+	mappers := []struct {
+		name string
+		mapf func(error) error
+	}{
+		{name: "status", mapf: StatusError},
+		{name: "backend", mapf: func(err error) error { return BackendStatus(context.Background(), err) }},
+	}
+
+	for _, mapper := range mappers {
+		for _, test := range tests {
+			t.Run(mapper.name+"/"+test.name, func(t *testing.T) {
+				input := grpcStatusError{status: status.New(test.code, "key=secret payload=private address=10.0.0.1")}
+				err := mapper.mapf(input)
+				if err == nil {
+					t.Fatal("status mapper returned nil for a non-nil error")
+				}
+				got := status.Convert(err)
+				if got.Code() != codes.Internal || got.Message() != "internal error" {
+					t.Fatalf("status mapper = (%s, %q), want (Internal, %q)", got.Code(), got.Message(), "internal error")
+				}
+				assertSanitized(t, got.Message())
+			})
+		}
+	}
+}
+
 func TestBackendStatus(t *testing.T) {
 	t.Parallel()
 
@@ -150,6 +188,7 @@ func TestObjectInfoMetadata(t *testing.T) {
 	}{
 		{name: "zero", info: store.ObjectInfo{}},
 		{name: "nonzero", info: store.ObjectInfo{Size: 42, ExpiresAt: time.UnixMilli(1712345678123)}, wantSize: 42, wantExpiry: 1712345678123},
+		{name: "pre epoch", info: store.ObjectInfo{Size: 7, ExpiresAt: time.UnixMilli(-1234)}, wantSize: 7, wantExpiry: -1234},
 		{name: "negative size does not wrap", info: store.ObjectInfo{Size: -1}},
 	}
 
@@ -165,6 +204,18 @@ func TestObjectInfoMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+type grpcStatusError struct {
+	status *status.Status
+}
+
+func (e grpcStatusError) Error() string {
+	return "key=secret payload=private address=10.0.0.1"
+}
+
+func (e grpcStatusError) GRPCStatus() *status.Status {
+	return e.status
 }
 
 func assertSanitized(t *testing.T, message string) {

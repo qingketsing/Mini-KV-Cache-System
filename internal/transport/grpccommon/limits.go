@@ -1,6 +1,9 @@
 package grpccommon
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 const framingReserveBytes = 64 << 10
 
@@ -30,6 +33,9 @@ func (l Limits) Validate() error {
 	}
 	if l.MaxObjectBytes <= 0 {
 		return fmt.Errorf("grpccommon: object size must be positive")
+	}
+	if l.MaxObjectBytes > int64(math.MaxUint32)+1 {
+		return fmt.Errorf("grpccommon: object size exceeds chunk sequence space")
 	}
 	if l.MaxMessageBytes <= framingReserveBytes {
 		return fmt.Errorf("grpccommon: message size must exceed framing reserve")

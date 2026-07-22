@@ -21,7 +21,8 @@ var (
 	errLongStream       = errors.New("grpccommon: long stream")
 )
 
-// ParsePutHeader validates and converts a wire Put header.
+// ParsePutHeader validates and converts a wire Put header. The returned key is
+// borrowed from header and remains valid while the protobuf message is owned.
 func ParsePutHeader(header *minikvv1.PutHeader, limits Limits) ([]byte, int64, time.Duration, error) {
 	if header == nil {
 		return nil, 0, 0, fmt.Errorf("parse put header: %w", errMalformedHeader)

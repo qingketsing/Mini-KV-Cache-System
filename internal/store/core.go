@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+
+	"github.com/qingketsing/Mini-KV-Cache-System/internal/sharding"
 )
 
 type coreDependencies struct {
 	arena            Arena
 	clock            clock
-	hash             hashFunc
+	hash             sharding.HashFunc
 	startMaintenance bool
 }
 
@@ -20,7 +22,7 @@ type CoreStore struct {
 
 	arena Arena
 	clock clock
-	hash  hashFunc
+	hash  sharding.HashFunc
 
 	shards   []shard
 	staging  *byteBudget
@@ -52,7 +54,7 @@ type CoreStore struct {
 func New(cfg Config) (Store, error) {
 	return newCoreStore(cfg, coreDependencies{
 		clock:            realClock{},
-		hash:             protocolHash,
+		hash:             sharding.Hash,
 		startMaintenance: true,
 	})
 }
@@ -68,7 +70,7 @@ func newCoreStore(cfg Config, dependencies coreDependencies) (*CoreStore, error)
 		dependencies.clock = realClock{}
 	}
 	if dependencies.hash == nil {
-		dependencies.hash = protocolHash
+		dependencies.hash = sharding.Hash
 	}
 
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())

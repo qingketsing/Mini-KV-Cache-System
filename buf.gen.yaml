@@ -1,0 +1,15 @@
+version: v2
+clean: true
+plugins:
+  - remote: buf.build/protocolbuffers/go:v1.36.11
+    revision: 1
+    out: gen/go
+    opt: [paths=source_relative]
+  - remote: buf.build/grpc/go:v1.5.1
+    revision: 2
+    out: gen/go
+    opt:
+      - paths=source_relative
+      - use_generic_streams_experimental=false
+inputs:
+  - directory: api

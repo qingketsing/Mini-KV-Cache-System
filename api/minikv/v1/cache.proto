@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package minikv.v1;
+
+option go_package = "github.com/qingketsing/Mini-KV-Cache-System/gen/go/minikv/v1;minikvv1";
+
+// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE Cache and node RPCs intentionally share response frames.
+service CacheService {
+  rpc Put(stream PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (stream GetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
+
+// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE Cache and node RPCs intentionally share response frames.
+// buf:lint:ignore RPC_REQUEST_STANDARD_NAME Node request names carry their routing boundary explicitly.
+service NodeService {
+  rpc Put(stream NodePutRequest) returns (PutResponse);
+  rpc Get(NodeGetRequest) returns (stream GetResponse);
+  rpc Delete(NodeDeleteRequest) returns (DeleteResponse);
+}
+
+message PutHeader {
+  bytes key = 1;
+  uint64 value_size = 2;
+  uint64 ttl_milliseconds = 3;
+  bytes request_id = 4;
+}
+
+message DataChunk {
+  uint32 sequence = 1;
+  bytes data = 2;
+}
+
+message PutRequest {
+  oneof frame {
+    PutHeader header = 1;
+    DataChunk chunk = 2;
+  }
+}
+
+message PutResponse {
+  uint64 value_size = 1;
+  int64 expires_at_unix_milliseconds = 2;
+}
+
+message GetRequest {
+  bytes key = 1;
+}
+
+message GetHeader {
+  uint64 value_size = 1;
+  int64 expires_at_unix_milliseconds = 2;
+}
+
+message GetResponse {
+  oneof frame {
+    GetHeader header = 1;
+    DataChunk chunk = 2;
+  }
+}
+
+message DeleteRequest {
+  bytes key = 1;
+}
+
+message DeleteResponse {
+  bool deleted = 1;
+}
+
+message RouteContext {
+  uint32 shard_id = 1;
+  uint64 shard_epoch = 2;
+}
+
+message NodePutHeader {
+  RouteContext route = 1;
+  PutHeader request = 2;
+}
+
+message NodePutRequest {
+  oneof frame {
+    NodePutHeader header = 1;
+    DataChunk chunk = 2;
+  }
+}
+
+message NodeGetRequest {
+  RouteContext route = 1;
+  GetRequest request = 2;
+}
+
+message NodeDeleteRequest {
+  RouteContext route = 1;
+  DeleteRequest request = 2;
+}

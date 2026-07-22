@@ -1,18 +1,45 @@
 package store
 
 import (
+	"context"
+	"strings"
 	"testing"
 
-	"github.com/zeebo/xxh3"
+	"github.com/qingketsing/Mini-KV-Cache-System/internal/sharding"
 )
 
-func TestShardIDUsesSeedZeroXXH3(t *testing.T) {
-	const knownHelloXXH3 = uint64(0x9555e8555c62dcfd)
+type hashFunc = sharding.HashFunc
 
-	if got := xxh3.HashSeed([]byte("hello"), shardHashSeed); got != knownHelloXXH3 {
-		t.Fatalf("protocol hash = %#x", got)
+var (
+	protocolHash    = sharding.Hash
+	shardIDWithHash = sharding.IDWithHash
+)
+
+func TestStoreUsesSharedHash(t *testing.T) {
+	injectedHash := sharding.HashFunc(func(key []byte) uint64 {
+		if got, want := string(key), "shared-hash"; got != want {
+			t.Fatalf("hash key = %q, want %q", got, want)
+		}
+		return 3
+	})
+	cfg := compactConfig()
+	store, err := newCoreStore(cfg, coreDependencies{
+		clock: newManualClock(testTime),
+		hash:  injectedHash,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got, want := shardID([]byte("hello"), 1024), uint32(knownHelloXXH3&1023); got != want {
-		t.Fatalf("shard = %d, want %d", got, want)
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	if _, err := store.Put(context.Background(), []byte("shared-hash"), strings.NewReader("value"), PutOptions{Size: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.shards[3].entries["shared-hash"]; !ok {
+		t.Fatal("injected shared hash did not select shard 3")
 	}
 }

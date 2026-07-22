@@ -10,14 +10,18 @@ import (
 	"google.golang.org/grpc"
 )
 
+var errNilBackendConnection = errors.New("routing: dial returned a nil connection")
+
+// DialFunc creates a backend connection. Returning a nil connection with a nil
+// error is invalid and is normalized to an internal dial failure before
+// publication.
 type DialFunc func(string, ...grpc.DialOption) (*grpc.ClientConn, error)
 
 type poolEntry struct {
-	ready    chan struct{}
-	conn     *grpc.ClientConn
-	client   minikvv1.NodeServiceClient
-	err      error
-	closeErr error
+	ready  chan struct{}
+	conn   *grpc.ClientConn
+	client minikvv1.NodeServiceClient
+	err    error
 }
 
 type BackendPool struct {
@@ -42,6 +46,9 @@ func NewBackendPool(dial DialFunc, options ...grpc.DialOption) *BackendPool {
 	}
 }
 
+// Client returns the reusable client for address, creating it on first use. If
+// Client overlaps Close, it may return the client or ErrBackendPoolClosed based
+// on whether connection publication or pool closure linearizes first.
 func (p *BackendPool) Client(ctx context.Context, address string) (minikvv1.NodeServiceClient, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -70,57 +77,45 @@ func (p *BackendPool) Client(ctx context.Context, address string) (minikvv1.Node
 
 	options := append([]grpc.DialOption(nil), p.options...)
 	conn, err := p.dial(address, options...)
+	if conn == nil && err == nil {
+		err = errNilBackendConnection
+	}
 	return p.publishDial(address, entry, conn, err)
 }
 
 func (p *BackendPool) publishDial(address string, entry *poolEntry, conn *grpc.ClientConn, dialErr error) (minikvv1.NodeServiceClient, error) {
-	p.mu.Lock()
-	closed := p.closed
-	p.mu.Unlock()
-
-	if closed {
-		closeErr := closeConnection(conn)
-		p.mu.Lock()
-		entry.err = ErrBackendPoolClosed
-		entry.closeErr = closeErr
-		close(entry.ready)
-		p.mu.Unlock()
-		return nil, ErrBackendPoolClosed
-	}
-
 	if dialErr != nil {
 		closeErr := closeConnection(conn)
-		wrapped := fmt.Errorf("%w: %w", ErrBackendDial, dialErr)
+		publishedErr := joinError(fmt.Errorf("%w: %w", ErrBackendDial, dialErr), closeErr)
 		p.mu.Lock()
 		if p.closed {
-			entry.err = ErrBackendPoolClosed
-			entry.closeErr = closeErr
+			publishedErr = joinError(ErrBackendPoolClosed, closeErr)
+			entry.err = publishedErr
 			close(entry.ready)
 			p.mu.Unlock()
-			return nil, ErrBackendPoolClosed
+			return nil, publishedErr
 		}
-		entry.err = wrapped
-		entry.closeErr = closeErr
+		entry.err = publishedErr
 		if p.entries[address] == entry {
 			delete(p.entries, address)
 		}
 		close(entry.ready)
 		p.mu.Unlock()
-		return nil, wrapped
+		return nil, publishedErr
 	}
 
-	client := minikvv1.NewNodeServiceClient(conn)
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
 		closeErr := closeConnection(conn)
+		publishedErr := joinError(ErrBackendPoolClosed, closeErr)
 		p.mu.Lock()
-		entry.err = ErrBackendPoolClosed
-		entry.closeErr = closeErr
+		entry.err = publishedErr
 		close(entry.ready)
 		p.mu.Unlock()
-		return nil, ErrBackendPoolClosed
+		return nil, publishedErr
 	}
+	client := minikvv1.NewNodeServiceClient(conn)
 	entry.conn = conn
 	entry.client = client
 	close(entry.ready)
@@ -128,6 +123,9 @@ func (p *BackendPool) publishDial(address string, entry *poolEntry, conn *grpc.C
 	return client, nil
 }
 
+// Close closes connections published before pool closure. It does not wait for
+// custom DialFunc calls that have not returned; a late result is closed when
+// that dial is published. Close is safe to call concurrently and repeatedly.
 func (p *BackendPool) Close() error {
 	p.mu.Lock()
 	if p.closed {
@@ -140,27 +138,26 @@ func (p *BackendPool) Close() error {
 		return err
 	}
 	p.closed = true
-	entries := make([]*poolEntry, 0, len(p.entries))
+	connections := make([]*grpc.ClientConn, 0, len(p.entries))
 	for _, entry := range p.entries {
-		entries = append(entries, entry)
+		select {
+		case <-entry.ready:
+			if entry.conn != nil {
+				connections = append(connections, entry.conn)
+			}
+		default:
+		}
 	}
 	p.mu.Unlock()
 
 	var closeErrors []error
-	closedConnections := make(map[*grpc.ClientConn]struct{}, len(entries))
-	for _, entry := range entries {
-		<-entry.ready
-		if entry.closeErr != nil {
-			closeErrors = append(closeErrors, entry.closeErr)
-		}
-		if entry.conn == nil {
+	closedConnections := make(map[*grpc.ClientConn]struct{}, len(connections))
+	for _, conn := range connections {
+		if _, ok := closedConnections[conn]; ok {
 			continue
 		}
-		if _, ok := closedConnections[entry.conn]; ok {
-			continue
-		}
-		closedConnections[entry.conn] = struct{}{}
-		if err := entry.conn.Close(); err != nil {
+		closedConnections[conn] = struct{}{}
+		if err := conn.Close(); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("%w: %w", ErrBackendClose, err))
 		}
 	}
@@ -181,4 +178,11 @@ func closeConnection(conn *grpc.ClientConn) error {
 		return fmt.Errorf("%w: %w", ErrBackendClose, err)
 	}
 	return nil
+}
+
+func joinError(primary, secondary error) error {
+	if secondary == nil {
+		return primary
+	}
+	return errors.Join(primary, secondary)
 }

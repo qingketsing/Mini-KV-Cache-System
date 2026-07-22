@@ -256,6 +256,98 @@ func TestBackendPoolSharesDialFailureAndRetries(t *testing.T) {
 	}
 }
 
+func TestBackendPoolRejectsNilSuccessfulDialAndRetries(t *testing.T) {
+	var attempts atomic.Int32
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	dial := func(target string, options ...grpc.DialOption) (*grpc.ClientConn, error) {
+		if attempts.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseFirst
+			return nil, nil
+		}
+		return newLazyConn(target, options...)
+	}
+	pool := NewBackendPool(dial)
+	t.Cleanup(func() { _ = pool.Close() })
+
+	results := make(chan clientResult, 8)
+	go func() {
+		client, err := pool.Client(context.Background(), testTargetA)
+		results <- clientResult{client: client, err: err}
+	}()
+	<-firstStarted
+
+	contexts := make([]*observedContext, 7)
+	for i := range contexts {
+		contexts[i] = &observedContext{Context: context.Background(), doneObserved: make(chan struct{})}
+		go func(ctx context.Context) {
+			client, err := pool.Client(ctx, testTargetA)
+			results <- clientResult{client: client, err: err}
+		}(contexts[i])
+	}
+	for _, ctx := range contexts {
+		<-ctx.doneObserved
+	}
+	close(releaseFirst)
+
+	for i := 0; i < 8; i++ {
+		result := <-results
+		if result.client != nil {
+			t.Fatal("Client() cached a NodeService client with a nil connection")
+		}
+		if !errors.Is(result.err, ErrBackendDial) {
+			t.Fatalf("Client() error = %v, want ErrBackendDial", result.err)
+		}
+		if !errors.Is(result.err, errNilBackendConnection) {
+			t.Fatalf("Client() error = %v, want nil-connection dial error", result.err)
+		}
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("concurrent nil DialFunc calls = %d, want 1", got)
+	}
+
+	client, err := pool.Client(context.Background(), testTargetA)
+	if err != nil {
+		t.Fatalf("Client() retry failed: %v", err)
+	}
+	if client == nil {
+		t.Fatal("Client() retry returned a nil client")
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("DialFunc calls after retry = %d, want 2", got)
+	}
+}
+
+func TestBackendPoolDialFailureIncludesConnectionCleanupError(t *testing.T) {
+	dialFailure := errors.New("dial returned a partial connection")
+	pool := NewBackendPool(func(target string, options ...grpc.DialOption) (*grpc.ClientConn, error) {
+		conn, err := newLazyConn(target, options...)
+		if err != nil {
+			return nil, err
+		}
+		if err := conn.Close(); err != nil {
+			return nil, err
+		}
+		return conn, dialFailure
+	})
+	t.Cleanup(func() { _ = pool.Close() })
+
+	_, err := pool.Client(context.Background(), testTargetA)
+	if !errors.Is(err, ErrBackendDial) {
+		t.Fatalf("Client() error = %v, want ErrBackendDial", err)
+	}
+	if !errors.Is(err, dialFailure) {
+		t.Fatalf("Client() error = %v, want dial failure", err)
+	}
+	if !errors.Is(err, ErrBackendClose) {
+		t.Fatalf("Client() error = %v, want ErrBackendClose", err)
+	}
+	if !errors.Is(err, grpc.ErrClientConnClosing) {
+		t.Fatalf("Client() error = %v, want grpc.ErrClientConnClosing", err)
+	}
+}
+
 func TestBackendPoolCloseClosesConnectionsAndIsIdempotent(t *testing.T) {
 	var mu sync.Mutex
 	var connections []*grpc.ClientConn
@@ -297,9 +389,65 @@ func TestBackendPoolCloseClosesConnectionsAndIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestBackendPoolCloseRacingDial(t *testing.T) {
+func TestBackendPoolSimultaneousCloseCallers(t *testing.T) {
+	var connections []*grpc.ClientConn
+	dial := func(target string, options ...grpc.DialOption) (*grpc.ClientConn, error) {
+		conn, err := newLazyConn(target, options...)
+		if err == nil {
+			connections = append(connections, conn)
+		}
+		return conn, err
+	}
+	pool := NewBackendPool(dial)
+	for _, target := range []string{testTargetA, testTargetB} {
+		if _, err := pool.Client(context.Background(), target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := connections[0].Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	const callers = 32
+	start := make(chan struct{})
+	results := make(chan error, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			ready.Done()
+			<-start
+			results <- pool.Close()
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	var firstErr error
+	for i := 0; i < callers; i++ {
+		err := <-results
+		if !errors.Is(err, ErrBackendClose) || !errors.Is(err, grpc.ErrClientConnClosing) {
+			t.Fatalf("Close() error = %v, want shared connection close error", err)
+		}
+		if i == 0 {
+			firstErr = err
+		} else if err != firstErr {
+			t.Fatal("simultaneous Close callers did not receive the same error")
+		}
+	}
+	for i, conn := range connections {
+		if state := conn.GetState(); state != connectivity.Shutdown {
+			t.Errorf("connection %d state = %v, want %v", i, state, connectivity.Shutdown)
+		}
+	}
+}
+
+func TestBackendPoolCloseDoesNotWaitForBlockedDial(t *testing.T) {
 	dialStarted := make(chan struct{})
 	releaseDial := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseDial) }) }
+	defer release()
 	connection := make(chan *grpc.ClientConn, 1)
 	dial := func(target string, options ...grpc.DialOption) (*grpc.ClientConn, error) {
 		close(dialStarted)
@@ -321,14 +469,62 @@ func TestBackendPoolCloseRacingDial(t *testing.T) {
 
 	closeResult := make(chan error, 1)
 	go func() { closeResult <- pool.Close() }()
-	waitForPoolClosed(t, pool)
-	close(releaseDial)
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() blocked on an unreturned DialFunc")
+	}
+	if _, err := pool.Client(context.Background(), testTargetB); !errors.Is(err, ErrBackendPoolClosed) {
+		t.Fatalf("Client() after Close error = %v, want ErrBackendPoolClosed", err)
+	}
+	release()
 
 	if err := <-clientResult; !errors.Is(err, ErrBackendPoolClosed) {
 		t.Fatalf("Client() error = %v, want ErrBackendPoolClosed", err)
 	}
-	if err := <-closeResult; err != nil {
-		t.Fatalf("Close() error = %v", err)
+	conn := <-connection
+	if state := conn.GetState(); state != connectivity.Shutdown {
+		t.Fatalf("connection state = %v, want %v", state, connectivity.Shutdown)
+	}
+}
+
+func TestBackendPoolDialFuncCanClosePool(t *testing.T) {
+	var pool *BackendPool
+	closeResult := make(chan error, 1)
+	connection := make(chan *grpc.ClientConn, 1)
+	dial := func(target string, options ...grpc.DialOption) (*grpc.ClientConn, error) {
+		closeResult <- pool.Close()
+		conn, err := newLazyConn(target, options...)
+		if err == nil {
+			connection <- conn
+		}
+		return conn, err
+	}
+	pool = NewBackendPool(dial)
+
+	clientResult := make(chan error, 1)
+	go func() {
+		_, err := pool.Client(context.Background(), testTargetA)
+		clientResult <- err
+	}()
+	select {
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatalf("Close() from DialFunc error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() deadlocked inside DialFunc")
+	}
+	select {
+	case err := <-clientResult:
+		if !errors.Is(err, ErrBackendPoolClosed) {
+			t.Fatalf("Client() error = %v, want ErrBackendPoolClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Client() did not return after reentrant Close")
 	}
 	conn := <-connection
 	if state := conn.GetState(); state != connectivity.Shutdown {
@@ -395,19 +591,4 @@ func TestBackendPoolUsesDefaultDialerAndCopiesOptions(t *testing.T) {
 	if len(got) != 1 || got[0] != original {
 		t.Fatal("NewBackendPool did not preserve a defensive copy of dial options")
 	}
-}
-
-func waitForPoolClosed(t *testing.T, pool *BackendPool) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		pool.mu.Lock()
-		closed := pool.closed
-		pool.mu.Unlock()
-		if closed {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("pool did not enter closed state")
 }

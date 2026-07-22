@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
@@ -47,6 +49,73 @@ func TestNodePutConstructor(t *testing.T) {
 				t.Fatal("New() succeeded, want error")
 			}
 		})
+	}
+}
+
+func TestNodePutDirectHandlerContract(t *testing.T) {
+	key := []byte{0, 0xff, 1, 0x80, 2}
+	value := []byte("abcdefghij")
+	ttl := 1750 * time.Millisecond
+	expiresAt := time.Unix(1_700_000_000, 123_000_000)
+	recorder := &recordingStore{info: store.ObjectInfo{Size: 23, ExpiresAt: expiresAt}}
+	server, err := New(recorder, testLimits, testShardCount)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream := &scriptedNodePutServer{
+		ctx: context.Background(),
+		frames: []*minikvv1.NodePutRequest{
+			nodeHeader(key, uint64(len(value)), uint64(ttl/time.Millisecond), nil, 37, shardFor(t, key)),
+			nodeChunk(0, []byte("abcd")),
+			nodeChunk(1, []byte("efgh")),
+			nodeChunk(2, []byte("ij")),
+		},
+	}
+
+	if err := server.Put(stream); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	if recorder.putCalls != 1 {
+		t.Fatalf("Store.Put calls = %d, want 1", recorder.putCalls)
+	}
+	if !bytes.Equal(recorder.key, key) {
+		t.Fatalf("Store.Put key = %v, want %v", recorder.key, key)
+	}
+	if recorder.options != (store.PutOptions{Size: int64(len(value)), TTL: ttl}) {
+		t.Fatalf("Store.Put options = %+v, want size %d TTL %v", recorder.options, len(value), ttl)
+	}
+	if !bytes.Equal(recorder.value, value) {
+		t.Fatalf("Store.Put reader bytes = %q, want %q", recorder.value, value)
+	}
+	if stream.sendAndCloseCalls != 1 {
+		t.Fatalf("SendAndClose calls = %d, want 1", stream.sendAndCloseCalls)
+	}
+	if stream.response == nil || stream.response.GetValueSize() != uint64(recorder.info.Size) || stream.response.GetExpiresAtUnixMilliseconds() != expiresAt.UnixMilli() {
+		t.Fatalf("SendAndClose response = %+v, want size %d expiry %d", stream.response, recorder.info.Size, expiresAt.UnixMilli())
+	}
+}
+
+func TestNodePutSanitizesSendAndCloseError(t *testing.T) {
+	const secret = "secret key bytes and raw backend details"
+	key := []byte("send-error")
+	recorder := &recordingStore{}
+	server, err := New(recorder, testLimits, testShardCount)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream := &scriptedNodePutServer{
+		ctx:          context.Background(),
+		frames:       []*minikvv1.NodePutRequest{nodeHeader(key, 0, 0, nil, 0, shardFor(t, key))},
+		sendCloseErr: status.Error(codes.Aborted, secret),
+	}
+
+	err = server.Put(stream)
+	assertNodeCode(t, err, codes.Aborted)
+	if got := status.Convert(err).Message(); got != "request failed" || strings.Contains(got, secret) {
+		t.Fatalf("status message = %q, want sanitized request failure", got)
+	}
+	if stream.sendAndCloseCalls != 1 {
+		t.Fatalf("SendAndClose calls = %d, want 1", stream.sendAndCloseCalls)
 	}
 }
 
@@ -235,11 +304,14 @@ func TestNodePutPartialValueIsInvisible(t *testing.T) {
 
 func TestNodePutStoreErrors(t *testing.T) {
 	t.Run("no capacity", func(t *testing.T) {
-		client := newNodeTestClient(t, errorStore{putErr: store.ErrNoCapacity})
+		client := newNodeTestClient(t, errorStore{putErr: errors.Join(store.ErrNoCapacity, errors.New("secret capacity accounting"))})
 		stream := openNodePut(t, client, context.Background())
 		sendNodeHeader(t, stream, []byte("capacity"), 0, 0, nil, 0)
 		_, err := stream.CloseAndRecv()
 		assertNodeCode(t, err, codes.ResourceExhausted)
+		if got := status.Convert(err).Message(); got != "cache capacity unavailable" {
+			t.Fatalf("status message = %q, want sanitized capacity failure", got)
+		}
 	})
 
 	t.Run("closed", func(t *testing.T) {
@@ -431,3 +503,60 @@ func (errorStore) Get(context.Context, []byte) (store.Object, error) { return ni
 func (errorStore) Delete(context.Context, []byte) (bool, error)      { return false, nil }
 func (errorStore) Stats() store.Stats                                { return store.Stats{} }
 func (errorStore) Close() error                                      { return nil }
+
+type recordingStore struct {
+	info     store.ObjectInfo
+	putCalls int
+	key      []byte
+	options  store.PutOptions
+	value    []byte
+}
+
+func (s *recordingStore) Put(_ context.Context, key []byte, source io.Reader, options store.PutOptions) (store.ObjectInfo, error) {
+	s.putCalls++
+	s.key = append([]byte(nil), key...)
+	s.options = options
+	value, err := io.ReadAll(source)
+	s.value = append([]byte(nil), value...)
+	if err != nil {
+		return store.ObjectInfo{}, err
+	}
+	return s.info, nil
+}
+func (*recordingStore) Get(context.Context, []byte) (store.Object, error) {
+	return nil, store.ErrNotFound
+}
+func (*recordingStore) Delete(context.Context, []byte) (bool, error) { return false, nil }
+func (*recordingStore) Stats() store.Stats                           { return store.Stats{} }
+func (*recordingStore) Close() error                                 { return nil }
+
+type scriptedNodePutServer struct {
+	ctx               context.Context
+	frames            []*minikvv1.NodePutRequest
+	next              int
+	response          *minikvv1.PutResponse
+	sendAndCloseCalls int
+	sendCloseErr      error
+}
+
+func (s *scriptedNodePutServer) SendAndClose(response *minikvv1.PutResponse) error {
+	s.sendAndCloseCalls++
+	s.response = response
+	return s.sendCloseErr
+}
+
+func (s *scriptedNodePutServer) Recv() (*minikvv1.NodePutRequest, error) {
+	if s.next == len(s.frames) {
+		return nil, io.EOF
+	}
+	frame := s.frames[s.next]
+	s.next++
+	return frame, nil
+}
+
+func (*scriptedNodePutServer) SetHeader(metadata.MD) error  { return nil }
+func (*scriptedNodePutServer) SendHeader(metadata.MD) error { return nil }
+func (*scriptedNodePutServer) SetTrailer(metadata.MD)       {}
+func (s *scriptedNodePutServer) Context() context.Context   { return s.ctx }
+func (*scriptedNodePutServer) SendMsg(any) error            { return nil }
+func (*scriptedNodePutServer) RecvMsg(any) error            { return io.EOF }

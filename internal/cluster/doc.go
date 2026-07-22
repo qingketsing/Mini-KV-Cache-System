@@ -1,2 +1,3 @@
-// Package cluster will contain membership, sharding, and replication logic.
+// Package cluster is reserved for dynamic membership and replica coordination.
+// Key-to-backend resolution lives in the routing package.
 package cluster

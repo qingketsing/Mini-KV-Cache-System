@@ -1,0 +1,83 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  large-object:
+    name: 128 MiB Store Boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      MINIKV_LARGE_TEST: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run production object-size boundary test
+        run: go test ./internal/store -run '^TestProductionMaxObject$' -count=1
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzStoreRoundTrip
+          - FuzzHeapArenaDeclaredSize
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run bounded fuzz target
+        run: go test ./internal/store -run=^$ -fuzz='^${{ matrix.target }}$' -fuzztime=60s
+
+  benchmark:
+    name: Store Benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run benchmark
+        shell: bash
+        run: |
+          go test ./internal/store -run=^$ -bench='^BenchmarkStoreStreaming$' \
+            -benchtime=1s -benchmem | tee benchmark.txt
+
+      - name: Upload benchmark output
+        uses: actions/upload-artifact@v7
+        with:
+          name: store-benchmark
+          path: benchmark.txt
+          retention-days: 30
